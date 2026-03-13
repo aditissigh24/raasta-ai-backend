@@ -9,6 +9,7 @@ source venv/bin/activate  # Linux/Mac
 # Install/update dependencies
 pip install -r requirements.txt
 ```
+
 ### 3. Run the Application
 
 ```bash
