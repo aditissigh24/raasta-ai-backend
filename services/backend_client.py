@@ -170,6 +170,129 @@ class BackendClient:
             situations=user.get("situations", [])
         )
     
+    async def fetch_chapters(self) -> list:
+        """
+        Fetch all available chapters from the backend.
+
+        Expects the backend to expose:
+            GET /api/roleplay/chapters
+        Response body: { "chapters": [{id, name, description, scenarioCount, ...}] }
+
+        Returns an empty list on any error so callers can degrade gracefully.
+        """
+        try:
+            client = await self._get_client()
+            headers = {}
+            if settings.BACKEND_API_KEY:
+                headers["x-api-key"] = settings.BACKEND_API_KEY
+
+            response = await client.get("/api/roleplay/chapters", headers=headers)
+            response.raise_for_status()
+
+            data = response.json()
+            chapters = data.get("chapters", data if isinstance(data, list) else [])
+            logger.info(f"Fetched {len(chapters)} chapters from backend")
+            return chapters
+        except Exception as e:
+            logger.error(f"Failed to fetch chapters: {e}")
+            return []
+
+    async def fetch_scenarios_by_chapter(self, chapter_id: str) -> list:
+        """
+        Fetch all scenarios belonging to a specific chapter.
+
+        Expects the backend to expose:
+            GET /api/roleplay/scenarios?chapterId=<chapter_id>
+        Response body: { "scenarios": [{scenario_id, char_id, scenario_title, ...}] }
+
+        Returns an empty list on any error so callers can degrade gracefully.
+        """
+        try:
+            client = await self._get_client()
+            headers = {}
+            if settings.BACKEND_API_KEY:
+                headers["x-api-key"] = settings.BACKEND_API_KEY
+
+            response = await client.get(
+                "/api/roleplay/scenarios",
+                params={"chapterId": chapter_id},
+                headers=headers,
+            )
+            response.raise_for_status()
+
+            data = response.json()
+            scenarios = data.get("scenarios", data if isinstance(data, list) else [])
+            logger.info(
+                f"Fetched {len(scenarios)} scenarios for chapter {chapter_id}"
+            )
+            return scenarios
+        except Exception as e:
+            logger.error(f"Failed to fetch scenarios for chapter {chapter_id}: {e}")
+            return []
+
+    async def fetch_character(self, character_id: str) -> dict:
+        """
+        Fetch a character record from the backend by character ID.
+
+        Args:
+            character_id: Character identifier (e.g. "C01").
+
+        Returns:
+            Character dict with fields: char_id, name, age, city, archetype,
+            vibe_summary, backstory, speaking_style, emoji_usage, texting_speed, etc.
+
+        Raises:
+            httpx.HTTPStatusError: If the request fails.
+        """
+        client = await self._get_client()
+        headers = {}
+        if settings.BACKEND_API_KEY:
+            headers["x-api-key"] = settings.BACKEND_API_KEY
+
+        response = await client.get(
+            f"/api/roleplay/characters/{character_id}",
+            headers=headers,
+        )
+        response.raise_for_status()
+
+        data = response.json()
+        character = data.get("character", data)
+        logger.info(f"Fetched character {character_id}: {character.get('name', '?')}")
+        return character
+
+    async def fetch_scenario(self, scenario_id: str) -> dict:
+        """
+        Fetch a scenario record from the backend by scenario ID.
+
+        Args:
+            scenario_id: Scenario identifier (e.g. "S01").
+
+        Returns:
+            Scenario dict with fields: scenario_id, char_id, chapter, chapter_name,
+            scenario_title, difficulty, situation_setup_for_user, learning_objective,
+            good_outcome, bad_outcome, primal_hook, etc.
+
+        Raises:
+            httpx.HTTPStatusError: If the request fails.
+        """
+        client = await self._get_client()
+        headers = {}
+        if settings.BACKEND_API_KEY:
+            headers["x-api-key"] = settings.BACKEND_API_KEY
+
+        response = await client.get(
+            f"/api/roleplay/scenarios/{scenario_id}",
+            headers=headers,
+        )
+        response.raise_for_status()
+
+        data = response.json()
+        scenario = data.get("scenario", data)
+        logger.info(
+            f"Fetched scenario {scenario_id}: {scenario.get('scenario_title', '?')}"
+        )
+        return scenario
+
     async def update_user_details(self, user_id: str, updates: Dict) -> bool:
         """
         Update user configuration fields in the backend service.

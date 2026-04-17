@@ -1,6 +1,18 @@
 """Prompts package."""
-from .coach_agent_prompt import COACH_PROMPTS, get_coach_prompt
+from .roleplay_prompt import (
+    get_character_prompt,
+    get_character_opening,
+    get_wingman_feedback_messages,
+    character_initiates,
+    WINGMAN_PROMPT,
+)
 
-__all__ = ["COACH_PROMPTS", "get_coach_prompt"]
+__all__ = [
+    "get_character_prompt",
+    "get_character_opening",
+    "get_wingman_feedback_messages",
+    "character_initiates",
+    "WINGMAN_PROMPT",
+]
 
 

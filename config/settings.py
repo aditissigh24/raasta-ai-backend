@@ -40,11 +40,18 @@ class Settings:
     EVENT_API_KEYS: str = os.getenv("EVENT_API_KEYS", "")
     EVENT_API_URL: str = os.getenv("EVENT_API_URL", "http://localhost:8080/api/v1/events")
 
-    # AI Response Kill Switch
+    # AI Kill Switch
     AI_RESPONSES_ENABLED: bool = os.getenv("AI_RESPONSES_ENABLED", "true").lower() == "true"
 
     # Coach Types
     COACH_TYPES: list = ["kabir", "tara", "vikram"]
+
+    # Socket.IO worker (direct connection to socket-server)
+    SOCKET_SERVER_URL: str = os.getenv("SOCKET_SERVER_URL", "")
+    AI_WORKER_SECRET: str = os.getenv("AI_WORKER_SECRET", "")
+
+    # PostgreSQL direct access
+    DATABASE_URL: str = os.getenv("DATABASE_URL", "")
 
 
 

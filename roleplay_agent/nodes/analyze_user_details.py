@@ -23,35 +23,35 @@ class UserDetailsExtraction(BaseModel):
 def get_missing_fields(user_config: dict) -> List[str]:
     """
     Identify which fields are missing or have default values in user_config.
-    
+
     Args:
         user_config: User configuration dictionary
-        
+
     Returns:
         List of field names that are missing
     """
     missing = []
-    
+
     name = user_config.get("name", "")
     if not name or name == "Friend":
         missing.append("name")
-    
+
     gender = user_config.get("gender", "")
     if not gender or gender == "unknown":
         missing.append("gender")
-    
+
     age = user_config.get("age", 25)
     if age == 25 or age == 0:
         missing.append("age")
-    
+
     current_situation = user_config.get("currentSituation", "")
     if not current_situation:
         missing.append("currentSituation")
-    
+
     situations = user_config.get("situations", [])
     if not situations:
         missing.append("situations")
-    
+
     return missing
 
 
@@ -62,30 +62,28 @@ async def analyze_user_details(
 ) -> Optional[Dict]:
     """
     Analyze user message to extract missing user details using LLM.
-    
+
     Args:
         user_message: The user's message text
         user_config: Current user configuration
         missing_fields: List of fields that need to be extracted
-        
+
     Returns:
         Dictionary of extracted fields, or None if extraction failed
     """
     if not missing_fields:
         logger.info("No missing fields to extract")
         return None
-    
+
     try:
-        # Initialize LLM with structured output
         llm = ChatOpenAI(
             model=settings.OPENAI_MODEL,
             temperature=0,
             api_key=settings.OPENAI_API_KEY
         )
-        
+
         structured_llm = llm.with_structured_output(UserDetailsExtraction)
-        
-        # Build system prompt
+
         system_prompt = f"""You are analyzing a user's message to extract personal information for their profile.
 
 Current user profile:
@@ -107,42 +105,38 @@ Your task:
 
 If a field is not mentioned in the message, leave it as null.
 """
-        
-        # Create messages
+
         messages = [
             SystemMessage(content=system_prompt),
             HumanMessage(content=f"User message: {user_message}")
         ]
-        
-        # Get structured response
+
         result = structured_llm.invoke(messages)
-        
-        # Convert to dict and filter out None values and non-missing fields
+
         extracted = {}
-        
+
         if "name" in missing_fields and result.name:
             extracted["name"] = result.name
-        
+
         if "gender" in missing_fields and result.gender:
             extracted["gender"] = result.gender
-        
+
         if "age" in missing_fields and result.age:
-            # Map to ageRange field for backend
             extracted["ageRange"] = result.age
-        
+
         if "currentSituation" in missing_fields and result.currentSituation:
             extracted["currentSituation"] = result.currentSituation
-        
+
         if "situations" in missing_fields and result.situations:
             extracted["situations"] = result.situations
-        
+
         if extracted:
-            logger.info(f"🔍 Extracted user details: {list(extracted.keys())}")
+            logger.info(f"Extracted user details: {list(extracted.keys())}")
             return extracted
         else:
-            logger.info("🔍 No user details found in message")
+            logger.info("No user details found in message")
             return None
-            
+
     except Exception as e:
         logger.error(f"Error analyzing user details: {e}")
         return None

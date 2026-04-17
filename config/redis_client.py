@@ -339,6 +339,49 @@ class RedisClient:
             logger.error(f"Unexpected error in Redis DELETE for {key}: {e}")
             return False
 
+    # --- Onboarding state helpers ---
+
+    async def is_user_in_onboarding(self, user_id: str) -> bool:
+        """
+        Return True if the user has an active (incomplete) onboarding session.
+
+        A user is "in onboarding" when:
+        - Their onboarding state key exists in Redis AND
+        - current_step is not "complete"
+
+        Returns False (i.e. proceed to roleplay) if:
+        - No onboarding state exists (fresh user whose first-contact greeting
+          hasn't been triggered yet — handle via user:session event, not here)
+        - State step is "complete"
+        """
+        import json as _json
+        raw = await self.get(f"raasta:onboarding:state:{user_id}")
+        if not raw:
+            return False
+        try:
+            state = _json.loads(raw)
+            return state.get("current_step", "init") != "complete"
+        except Exception:
+            return False
+
+    async def set_onboarding_complete(self, user_id: str) -> bool:
+        """Mark onboarding as complete for a user (used externally if needed)."""
+        import json as _json
+        key = f"raasta:onboarding:state:{user_id}"
+        raw = await self.get(key)
+        if raw:
+            try:
+                state = _json.loads(raw)
+                state["current_step"] = "complete"
+                return await self.set(key, _json.dumps(state), ex=86400)
+            except Exception:
+                pass
+        return False
+
+    async def get_onboarding_state_raw(self, user_id: str) -> str | None:
+        """Return raw JSON string of the onboarding state, or None."""
+        return await self.get(f"raasta:onboarding:state:{user_id}")
+
     # --- Pub/Sub ---
 
     async def publish(self, channel: str, message: dict) -> bool:
@@ -349,6 +392,7 @@ class RedisClient:
         try:
             await self._client.publish(channel, json.dumps(message))
             logger.info(f"📤 Published to {channel}")
+            logger.info(f"message is  {json.dumps(message)}")
             return True
         except RedisError as e:
             logger.error(f"Redis PUBLISH error on {channel}: {e}")
