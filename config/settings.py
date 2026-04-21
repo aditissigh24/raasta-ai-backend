@@ -53,6 +53,21 @@ class Settings:
     # PostgreSQL direct access
     DATABASE_URL: str = os.getenv("DATABASE_URL", "")
 
+    # Wingman — LLM providers
+    DEEPSEEK_API_KEY: str = os.getenv("DEEPSEEK_API_KEY", "")
+    DEEPSEEK_BASE_URL: str = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+    ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
+
+    # Wingman — Langfuse observability
+    LANGFUSE_SECRET_KEY: str = os.getenv("LANGFUSE_SECRET_KEY", "")
+    LANGFUSE_PUBLIC_KEY: str = os.getenv("LANGFUSE_PUBLIC_KEY", "")
+    LANGFUSE_HOST: str = os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com")
+
+    # Wingman — tuning
+    EVAL_INTERVAL_TURNS: int = int(os.getenv("EVAL_INTERVAL_TURNS", "3"))
+    MAX_HISTORY_TURNS: int = int(os.getenv("MAX_HISTORY_TURNS", "12"))
+    DEEPSEEK_TIMEOUT_SECONDS: int = int(os.getenv("DEEPSEEK_TIMEOUT_SECONDS", "8"))
+
 
 
 settings = Settings()

@@ -12,6 +12,12 @@ real-time AI interactions:
     ai:response  — main reply + optional side-effect payloads
                    (name_collected, age_collected, scenario_selected)
 
+Roleplay streaming protocol (new):
+    roleplay_typing  — emitted immediately on recovery path (shows "thinking...")
+    roleplay_token   — batched text chunks (every 4 tokens or 30ms)
+    roleplay         — final complete event after stream ends
+    roleplay_error   — emitted if stream fails mid-response
+
 The socket-server routes each ai:response to the correct user room and handles
 all Prisma/DB writes declared in the side-effect type fields.
 """
@@ -25,10 +31,10 @@ import socketio
 from config.settings import settings
 from config.redis_client import redis_client
 from config.pg_client import pg_client
-from roleplay_agent.agent import run_roleplay_agent
 from onboarding_agent.agent import run_onboarding_agent
 from services.webhook_handler import convert_db_messages_to_langchain
 from services.task_manager import create_background_task
+from wingman import pipeline as wingman_pipeline
 
 logger = logging.getLogger(__name__)
 
@@ -257,11 +263,16 @@ async def handle_roleplay(data: dict) -> None:
     """
     Process a roleplay_start or roleplay ai:request.
 
-    Flow:
-      1. Pre-fetch user config, character, and scenario from Postgres.
-      2. Fetch conversation message history from Postgres.
-      3. Run the roleplay LangGraph agent.
-      4. Emit ai:response with the character's reply + optional wingmanTip.
+    roleplay_start:
+        - Record active session in Redis
+        - Emit DB-stored opening messages (initialMessages / initialChips)
+        - Prime the Redis session cache (no-wait background task)
+
+    roleplay (subsequent turns):
+        - Stream tokens via wingman pipeline
+        - Emit roleplay_token batches as they arrive
+        - Emit final roleplay event after stream completes
+        - Emit roleplay_error on failure
     """
     is_start = data.get("type") == "roleplay_start"
     user_id = data.get("userId", "")
@@ -279,8 +290,7 @@ async def handle_roleplay(data: dict) -> None:
 
     try:
         # ----------------------------------------------------------------
-        # On roleplay_start, record this as the user's active session so
-        # the disconnect handler can summarise it later.
+        # On roleplay_start, record active session in Redis and prime cache
         # ----------------------------------------------------------------
         if is_start and conversation_id:
             active_data = json.dumps({
@@ -295,67 +305,8 @@ async def handle_roleplay(data: dict) -> None:
                 ex=_ACTIVE_SESSION_TTL,
             )
 
-        # ----------------------------------------------------------------
-        # Pre-fetch config from Postgres in parallel
-        # ----------------------------------------------------------------
-        user_config_task = _safe_fetch_user(user_id)
-        character_task = _safe_fetch_character(character_id)
-        scenario_task = _safe_fetch_scenario(scenario_id)
-
-        user_config, character_data, scenario_data = await asyncio.gather(
-            user_config_task, character_task, scenario_task
-        )
-
-        # ----------------------------------------------------------------
-        # Fetch conversation history from Postgres
-        # ----------------------------------------------------------------
-        history_messages = []
-        if conversation_id:
-            try:
-                history_messages = await pg_client.fetch_messages_by_conversation(
-                    conversation_id
-                )
-                logger.info(
-                    f"Fetched {len(history_messages)} messages for conv={conversation_id}"
-                )
-            except Exception as e:
-                logger.warning(f"Could not fetch message history: {e}")
-
-        # For roleplay_start the history is empty; for roleplay we exclude
-        # the latest user message since it's passed separately to the agent.
-        existing_messages = convert_db_messages_to_langchain(
-            history_messages[:-1] if history_messages and not is_start else []
-        )
-
-        # ----------------------------------------------------------------
-        # Fetch recent session summaries for continuity context
-        # ----------------------------------------------------------------
-        session_summaries: list[str] = []
-        try:
-            summaries = await pg_client.fetch_recent_session_summaries(
-                user_id, conversation_id, limit=3
-            )
-            session_summaries = [
-                s.get("summaryText", "") for s in summaries if s.get("summaryText")
-            ]
-        except Exception as e:
-            logger.warning(f"Could not fetch session summaries: {e}")
-
-        # ----------------------------------------------------------------
-        # Determine user message for this turn
-        # ----------------------------------------------------------------
-        # roleplay_start: text is "__START__" — character sends the opening line
-        user_message: Optional[str] = None
-        if not is_start and raw_text and raw_text != "__START__":
-            user_message = raw_text
-
-        # ----------------------------------------------------------------
-        # Emit ai:response
-        # ----------------------------------------------------------------
-        if is_start:
-            # Use DB-stored opening messages and chip options from the Scenario table.
-            # initialMessages: list of strings (character's opening chat bubbles)
-            # initialChips: list of strings (tap-to-reply labels for the user)
+            # Fetch scenario for opening messages
+            scenario_data = await _safe_fetch_scenario(scenario_id)
             initial_messages = scenario_data.get("initialMessages") or []
             initial_chips_raw = scenario_data.get("initialChips") or []
             initial_chips = [
@@ -382,25 +333,32 @@ async def handle_roleplay(data: dict) -> None:
                         "isUserMessage": False,
                     }
                     await _emit("ai:response", payload)
+
+                # Pre-warm Redis session cache in the background (don't block emit)
+                asyncio.create_task(
+                    wingman_pipeline.prime_session_cache(conversation_id),
+                    name=f"prime-cache-{conversation_id[:8]}",
+                )
+
                 logger.info(
                     f"Roleplay start sent ({len(initial_messages)} messages) | "
                     f"userId={user_id} conv={conversation_id}"
                 )
             else:
-                # Fallback: no initialMessages in DB — generate opening via agent
-                result = await run_roleplay_agent(
-                    session_id=conversation_id or session_id,
-                    user_id=user_id,
-                    character_id=character_id,
-                    scenario_id=scenario_id,
-                    user_message=None,
-                    existing_messages=existing_messages,
-                    user_config=user_config,
-                    character_data=character_data,
-                    scenario_data=scenario_data,
-                    config_fetched=True,
-                    session_summaries=session_summaries,
-                )
+                # No initialMessages — generate opening via pipeline and prime cache
+                await wingman_pipeline.prime_session_cache(conversation_id)
+
+                full_response = ""
+                try:
+                    async for chunk in wingman_pipeline.handle_turn_streaming(
+                        conversation_id=conversation_id,
+                        user_message="",
+                        user_id=user_id,
+                    ):
+                        full_response += chunk
+                except Exception:
+                    pass  # errors handled inside pipeline
+
                 payload = {
                     "type": "roleplay_start",
                     "userId": user_id,
@@ -408,54 +366,114 @@ async def handle_roleplay(data: dict) -> None:
                     "messageId": message_id,
                     "sessionId": session_id,
                     "conversationId": conversation_id,
-                    "replyText": result["response"],
+                    "replyText": full_response,
                     "options": None,
                     "onboardingComplete": False,
                     "scenarioId": scenario_id,
                     "characterId": character_id,
-                    "wingmanTip": result.get("wingman_tip"),
+                    "wingmanTip": None,
                     "isUserMessage": False,
                 }
                 await _emit("ai:response", payload)
                 logger.info(
-                    f"Roleplay start sent (fallback agent) | "
+                    f"Roleplay start sent (pipeline fallback) | "
                     f"userId={user_id} conv={conversation_id}"
                 )
 
         else:
-            # Regular subsequent roleplay turn — run agent and emit single response
-            result = await run_roleplay_agent(
-                session_id=conversation_id or session_id,
-                user_id=user_id,
-                character_id=character_id,
-                scenario_id=scenario_id,
-                user_message=user_message,
-                existing_messages=existing_messages,
-                user_config=user_config,
-                character_data=character_data,
-                scenario_data=scenario_data,
-                config_fetched=True,
-                session_summaries=session_summaries,
-            )
-            payload = {
-                "type": "roleplay",
-                "userId": user_id,
-                "roomId": room_id,
+            # ----------------------------------------------------------------
+            # Regular roleplay turn — stream tokens to client
+            # ----------------------------------------------------------------
+            user_message: Optional[str] = None
+            if raw_text and raw_text != "__START__":
+                user_message = raw_text
+
+            if not user_message:
+                logger.warning(f"handle_roleplay: empty user message for userId={user_id}")
+                return
+
+            # Emit typing indicator immediately if this will be a recovery turn.
+            # The pipeline's pre-LLM phase is fast (Redis hit), but we emit
+            # roleplay_typing proactively so the frontend can show something instantly.
+            await _emit("ai:response", {
+                "type":      "roleplay_typing",
+                "userId":    user_id,
+                "roomId":    room_id,
                 "messageId": message_id,
-                "sessionId": session_id,
-                "conversationId": conversation_id,
-                "replyText": result["response"],
-                "options": None,
-                "onboardingComplete": False,
-                "scenarioId": scenario_id,
-                "characterId": character_id,
-                "wingmanTip": result.get("wingman_tip"),
-                "isUserMessage": False,
-            }
-            await _emit("ai:response", payload)
-            logger.info(
-                f"Roleplay response sent | userId={user_id} conv={conversation_id}"
-            )
+            })
+
+            full_response = ""
+            _buffer = ""
+            _last_emit_ts = asyncio.get_event_loop().time()
+            BATCH_TOKENS = 4
+            BATCH_MS = 0.030  # 30ms
+
+            try:
+                async for chunk in wingman_pipeline.handle_turn_streaming(
+                    conversation_id=conversation_id,
+                    user_message=user_message,
+                    user_id=user_id,
+                ):
+                    full_response += chunk
+                    _buffer += chunk
+                    now = asyncio.get_event_loop().time()
+
+                    # Batch: emit when buffer has 4+ tokens OR 30ms has passed
+                    if len(_buffer) >= BATCH_TOKENS or (now - _last_emit_ts) >= BATCH_MS:
+                        await _emit("ai:response", {
+                            "type":      "roleplay_token",
+                            "userId":    user_id,
+                            "roomId":    room_id,
+                            "messageId": message_id,
+                            "chunk":     _buffer,
+                        })
+                        _buffer = ""
+                        _last_emit_ts = now
+
+                # Flush any remaining buffer
+                if _buffer:
+                    await _emit("ai:response", {
+                        "type":      "roleplay_token",
+                        "userId":    user_id,
+                        "roomId":    room_id,
+                        "messageId": message_id,
+                        "chunk":     _buffer,
+                    })
+
+                # Final complete event
+                await _emit("ai:response", {
+                    "type":             "roleplay",
+                    "userId":           user_id,
+                    "roomId":           room_id,
+                    "messageId":        message_id,
+                    "sessionId":        session_id,
+                    "conversationId":   conversation_id,
+                    "replyText":        full_response,
+                    "options":          None,
+                    "onboardingComplete": False,
+                    "scenarioId":       scenario_id,
+                    "characterId":      character_id,
+                    "wingmanTip":       None,  # sent later via wingman_tip event
+                    "isUserMessage":    False,
+                })
+                logger.info(
+                    f"Roleplay response streamed | userId={user_id} "
+                    f"conv={conversation_id} tokens={len(full_response)}"
+                )
+
+            except Exception as stream_err:
+                logger.error(
+                    f"Stream failed for userId={user_id} conv={conversation_id}: "
+                    f"{stream_err}",
+                    exc_info=True,
+                )
+                await _emit("ai:response", {
+                    "type":      "roleplay_error",
+                    "userId":    user_id,
+                    "roomId":    room_id,
+                    "messageId": message_id,
+                    "error":     "Response generation failed — please try again",
+                })
 
     except asyncio.CancelledError:
         raise

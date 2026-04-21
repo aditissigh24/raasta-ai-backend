@@ -1,0 +1,499 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+/////////////////////// USER ///////////////////////
+
+model User {
+  id                     String         @id @default(cuid())
+  phone                  String?        @unique
+  email                  String?        @unique
+  countryCode            String         @default("+91")
+  name                   String?
+  ageRange               String?
+  gender                 Gender?
+  otplessUserId          String?
+  situations             String[]       @default([])
+  currentSituation       String?
+  createdAt              DateTime       @default(now())
+  updatedAt              DateTime       @updatedAt
+  lastLoginAt            DateTime?
+  deletedAt              DateTime?
+
+  preferredScenarioId    String?        @db.VarChar(10)
+  preferredChapterId     String?        @db.VarChar(10)
+
+  isGuest                Boolean        @default(false)
+  onboardingCompleted    Boolean        @default(false)
+  secondsBalance         Int            @default(0)
+  freeSessionUsed        Boolean        @default(false)
+  freeSecondsRemaining   Int            @default(300)
+  freeRoleplayChatDone   Boolean        @default(false)
+  isPro                  Boolean        @default(false)
+  proSince               DateTime?
+  razorpayCustomerId     String?
+
+  conversations          Conversation[]
+  sessionSummaries       SessionSummary[]
+  ratings                Rating[]
+  transactions           Transaction[]
+  razorpayOrders         RazorpayOrder[]
+  subscriptions          Subscription[]
+  preferredScenario      Scenario?      @relation("UserPreferredScenario", fields: [preferredScenarioId], references: [id], onDelete: SetNull)
+  preferredChapter       Chapter?       @relation("UserPreferredChapter", fields: [preferredChapterId], references: [id], onDelete: SetNull)
+
+  @@index([phone])
+  @@index([email])
+  @@index([deletedAt])
+}
+
+/////////////////////// RAZORPAY ///////////////////////
+
+model RazorpayOrder {
+  id                String   @id @default(cuid())
+  razorpayOrderId   String   @unique
+  userId            String
+  packageId         String
+  amountPaise       Int
+  minutes           Int
+  status            String   @default("created")
+  razorpayPaymentId String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([razorpayOrderId])
+}
+
+/////////////////////// SUBSCRIPTIONS ///////////////////////
+
+model Subscription {
+  id               String    @id @default(cuid())
+  userId           String
+  razorpaySubId    String    @unique
+  planId           String
+  status           String    @default("created")
+  currentPeriodEnd DateTime?
+  cancelledAt      DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  user             User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([razorpaySubId])
+}
+
+/////////////////////// TRANSACTIONS ///////////////////////
+
+model Transaction {
+  id            String          @id @default(cuid())
+  userId        String
+  type          TransactionType
+  amount        Int
+  reason        String
+  balanceBefore Int
+  balanceAfter  Int
+  createdAt     DateTime        @default(now())
+
+  user          User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([createdAt])
+}
+
+/////////////////////// CONVERSATIONS ///////////////////////
+
+model Conversation {
+  id             String             @id @default(cuid())
+  userId         String
+  scenarioId     String
+  chatroomId     String             @unique
+  status         ConversationStatus @default(ACTIVE)
+
+  startedAt      DateTime           @default(now())
+  lastMessageAt  DateTime           @default(now())
+  endedAt        DateTime?
+  deletedAt      DateTime?
+
+  // --- Beat Tracking ---
+  currentBeatId       String?
+  // Foreign key pointing to which ScenarioBeat the user is currently on.
+  // Null at start — set when first beat is loaded.
+
+  currentBeatNumber   Int            @default(1)
+  // Denormalized beat number (1–5) stored here so you dont need a join
+  // just to check which beat the user is on.
+
+  turnsInCurrentBeat  Int            @default(0)
+  // Counts how many turns the user has spent in the current beat.
+  // Used as a gate — beat won't advance until minTurnsInBeat is met.
+
+  totalTurns          Int            @default(0)
+  // Total turns across the entire conversation.
+  // Used for engagement eval scheduling (eval every N turns).
+
+  // --- Engagement Tracking ---
+  engagementScore     Float          @default(3.0)
+  // Latest score from the engagement evaluator (1.0 to 5.0).
+  // Determines whether to inject flow_directive or hook_directive
+  // and whether the Claude recovery path should activate.
+
+  lastEvalAt          Int            @default(0)
+  // The totalTurns value at which the last engagement eval ran.
+  // Used to schedule next eval: if totalTurns - lastEvalAt >= evalInterval, run eval.
+
+  user           User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  scenario       Scenario           @relation(fields: [scenarioId], references: [id], onDelete: Restrict)
+  currentBeat    ScenarioBeat?      @relation("ConversationCurrentBeat", fields: [currentBeatId], references: [id], onDelete: SetNull)
+  sessionSummaries SessionSummary[]
+  ratings         Rating[]
+  messages       Message[]
+
+  @@index([userId, status])
+  @@index([scenarioId, status])
+  @@index([startedAt])
+  @@index([lastMessageAt])
+  @@index([deletedAt])
+  @@index([userId, startedAt])
+  @@index([currentBeatId])
+}
+
+/////////////////////// MESSAGES ///////////////////////
+
+model Message {
+  id              String       @id @default(cuid())
+  conversationId  String
+
+  senderType      SenderType
+  senderId        String?
+
+  messageType     MessageType  @default(TEXT)
+  text            String?
+  attachmentUrl   String?
+
+  socketMessageId String?      @unique
+  sessionId       String?
+
+  // --- Turn & Beat Context ---
+  turnNumber      Int?
+  // Sequential turn number within the conversation.
+  // Makes it easy to fetch last N turns for engagement eval without sorting by date.
+
+  beatNumber      Int?
+  // Which beat (1–5) was active when this message was generated.
+  // Useful for analytics — e.g. at which beat do users disengage most?
+
+  // --- Engagement Recovery ---
+  wasEngagementTriggered  Boolean   @default(false)
+  // True if this response went through the Claude recovery path
+  // (Claude generated the hook, Deepseek rephrased it).
+  // Analytics: how often does recovery fire per scenario/character?
+
+  // --- Observability ---
+  langfuseTraceId  String?
+  // Trace ID returned by Langfuse for this specific LLM call.
+  // Lets you click into Langfuse dashboard and see exact prompt,
+  // latency, token count, and which prompt versions were used.
+
+  createdAt       DateTime     @default(now())
+  deletedAt       DateTime?
+
+  conversation    Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId])
+  @@index([conversationId, createdAt])
+  @@index([sessionId])
+  @@index([deletedAt])
+}
+
+/////////////////////// SESSION SUMMARY ///////////////////////
+
+model SessionSummary {
+  id             String   @id @default(cuid())
+  userId         String
+  characterId    String
+  scenarioId     String
+  conversationId String
+  sessionId      String
+
+  summaryText    String
+  createdAt      DateTime @default(now())
+
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  character      Character    @relation(fields: [characterId], references: [id], onDelete: Restrict)
+  scenario       Scenario     @relation(fields: [scenarioId], references: [id], onDelete: Restrict)
+  conversation   Conversation @relation(fields: [conversationId], references:[id], onDelete: Restrict)
+
+  @@index([userId, createdAt])
+  @@index([sessionId])
+}
+
+/////////////////////// RATINGS ///////////////////////
+
+model Rating {
+  id               String     @id @default(cuid())
+  userId           String
+  characterId      String
+  scenarioId       String
+  conversationId   String?
+  sessionId        String?
+
+  rating           Int
+  sentiment        Sentiment?
+
+  positiveReasons  String[]   @default([])
+  negativeReasons  String[]   @default([])
+
+  createdAt        DateTime   @default(now())
+
+  user             User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  character        Character  @relation(fields: [characterId], references: [id], onDelete: Restrict)
+  scenario         Scenario   @relation(fields: [scenarioId], references: [id], onDelete: Restrict)
+  conversation     Conversation? @relation(fields: [conversationId], references: [id])
+
+  @@index([userId, characterId, scenarioId])
+  @@index([sessionId])
+  @@index([createdAt])
+}
+
+/////////////////////// ROLEPLAY ///////////////////////
+
+model Chapter {
+  id        String     @id @db.VarChar(10)
+  name      String     @db.VarChar(255)
+
+  scenarios Scenario[]
+  preferredByUsers User[] @relation("UserPreferredChapter")
+}
+
+model Character {
+  id             String    @id @db.VarChar(10)
+  name           String    @db.VarChar(100)
+  age            Int?
+  city           String?   @db.VarChar(100)
+
+  archetype      String?   @db.VarChar(255)
+  vibeSummary    String?
+  backstory      String?
+  speakingStyle  String?
+  emojiUsage     String?   @db.VarChar(150)
+  textingSpeed   String?   @db.VarChar(150)
+
+  // --- Prompt Fields ---
+  voicePrompt    String?
+  // Rich free-text written by your writers describing exactly how this character
+  // speaks, their verbal tics, sentence rhythm, vocabulary choices, emotional register.
+  // Used specifically in the rephraser prompt so Deepseek can rewrite
+  // Claude's engagement hooks in this character's exact voice.
+
+  hardLimits     String[]  @default([])
+  // List of things this character must never do or say.
+  // e.g. ["never discuss real-world politics", "never reveal you are an AI"]
+  // Injected into the guardrails section of the assembled system prompt.
+
+  avatarPrompt   String?
+  avatarImage    String?
+  imageUrl       String?
+  accentHsl      String?   @db.VarChar(50)
+
+  isActive       Boolean   @default(true)
+
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  scenarios        Scenario[]
+  sessionSummaries SessionSummary[]
+  ratings          Rating[]
+  scenarioBeats    ScenarioBeat[]   // all beats written for this character across scenarios
+}
+
+model Scenario {
+  id                     String    @id @db.VarChar(10)
+  characterId            String    @db.VarChar(10)
+  chapterId              String?   @db.VarChar(10)
+
+  scenarioTitle          String?
+  difficulty             String?
+
+  situationSetupForUser  String?
+  imagePrompt            String?
+  imageUrl               String?
+  tagline                String?
+
+  learningObjective      String?
+  goodOutcome            String?
+  badOutcome             String?
+  primalHook             String?
+  initialMessages        String[]  @default([])
+  initialChips           String[]  @default([])
+
+  // --- Scene Directive Fields ---
+  settingDescription     String?
+  // Physical description of where this scene takes place.
+  // e.g. "Empty roads at 1am, light rain on the windshield, city lights blurring past"
+  // Fills {{setting_description}} in the scene-directive Langfuse template.
+
+  atmosphere             String?
+  // The mood and sensory texture of the scene beyond just location.
+  // e.g. "Intimate, slightly melancholic, unhurried. Old hindi songs on low volume."
+  // Gives the LLM the emotional flavour of the physical space.
+
+  tone                   String?
+  // The dominant emotional register for this scenario.
+  // e.g. "flirty" | "tense" | "mysterious" | "playful" | "bittersweet"
+  // Used to keep the character's responses tonally consistent.
+
+  timeOfDay              String?
+  // Time context that affects character mood and scene energy.
+  // e.g. "1am" | "golden hour" | "rainy afternoon" | "early morning"
+
+  overallArc             String?
+  // One-line summary of the full emotional journey this scenario is meant to take the user on.
+  // e.g. "A slow build from strangers to something undefined and unresolved."
+  // Gives the LLM awareness of the big picture without revealing upcoming beats.
+
+  isActive               Boolean   @default(true)
+
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+
+  character              Character   @relation(fields: [characterId], references: [id], onDelete: Cascade)
+  chapter                Chapter?    @relation(fields: [chapterId], references: [id], onDelete: SetNull)
+  beats                  ScenarioBeat[]
+  conversations          Conversation[]
+  sessionSummaries       SessionSummary[]
+  ratings                Rating[]
+  preferredByUsers       User[]      @relation("UserPreferredScenario")
+
+  @@index([characterId])
+  @@index([chapterId])
+}
+
+/////////////////////// SCENE BEATS ///////////////////////
+
+model ScenarioBeat {
+  id                      String    @id @default(cuid())
+  scenarioId              String
+  characterId             String
+  // Denormalized from scenario for efficient fetching.
+  // Lets you load character + beat in one query without joining through scenario.
+
+  beatNumber              Int
+  // Order of this beat within the scenario (1 through 5).
+  // 1 = HOOK ... 5 = CLIFFHANGER. Determines progression sequence.
+
+  beatType                BeatType
+  // The narrative function of this beat.
+  // HOOK → establish dynamic, create curiosity
+  // BUILD → deepen connection, raise stakes quietly
+  // TWIST → something unexpected shifts the scene
+  // CONSEQUENCE → character reacts to twist, scene destabilizes
+  // CLIFFHANGER → leave something unresolved, hint at more
+
+  // --- Story Content (written by your writers) ---
+  narrativeContext        String
+  // What has happened and where we are in the story at this exact beat.
+  // Injected into {{narrative_context}} in the current-beat Langfuse template.
+  // Gives the LLM situational awareness without revealing what comes next.
+
+  characterEmotionalState String
+  // How the character is feeling at this specific beat.
+  // e.g. "Warmer than before. Quietly curious. Testing the water without showing it."
+  // Injected into {{character_emotional_state}} — keeps emotional continuity beat to beat.
+
+  // --- Two Directive Variants (same beat, different gear) ---
+  flowDirective           String
+  // What the character should actively do when the user IS engaged.
+  // Lets the story breathe naturally, progresses the emotional arc.
+  // e.g. "Ask questions that go slightly deeper. React genuinely. Don't push."
+
+  hookDirective           String
+  // What the character should do when the user is NOT engaged.
+  // A deliberate punch, twist, or provocation to pull the user back in.
+  // e.g. "Say something unexpectedly observant about them. Make them feel seen. Don't explain it."
+  // Same beat, same narrative context — just a sharper gear.
+
+  // --- Beat Advance Logic ---
+  minTurnsInBeat          Int       @default(3)
+  // Minimum turns the user must spend in this beat before it can advance.
+  // Prevents the story from rushing forward even if engagement score is high.
+  // Writers set this based on how much time the beat needs to land properly.
+
+  engagedAdvanceScore     Float     @default(3.5)
+  // Engagement score threshold required to advance to the next beat.
+  // If user score is below this, they stay in the beat with hookDirective firing.
+  // If score is at or above this AND minTurnsInBeat is met, advance to next beat.
+
+  isActive                Boolean   @default(true)
+  createdAt               DateTime  @default(now())
+  updatedAt               DateTime  @updatedAt
+
+  scenario                Scenario  @relation(fields: [scenarioId], references: [id], onDelete: Cascade)
+  character               Character @relation(fields: [characterId], references: [id], onDelete: Restrict)
+  activeConversations     Conversation[] @relation("ConversationCurrentBeat")
+
+  @@unique([scenarioId, beatNumber])
+  @@index([scenarioId])
+  @@index([characterId])
+}
+
+/////////////////////// ENUMS ///////////////////////
+
+enum Gender {
+  MALE
+  FEMALE
+  NON_BINARY
+  PREFER_NOT_SAY
+}
+
+enum ConversationStatus {
+  ACTIVE
+  COMPLETED
+  ARCHIVED
+}
+
+enum SenderType {
+  USER
+  HUMAN_COACH
+  AI_COACH
+  SYSTEM
+}
+
+enum MessageType {
+  TEXT
+  IMAGE
+  FILE
+  SYSTEM
+}
+
+enum TransactionType {
+  CREDIT
+  DEBIT
+}
+
+enum Sentiment {
+  POSITIVE
+  NEGATIVE
+}
+
+enum BeatType {
+  HOOK          // Beat 1 — establish dynamic, spark curiosity
+  BUILD         // Beat 2 — deepen connection, raise stakes quietly
+  TWIST         // Beat 3 — unexpected shift changes the scene
+  CONSEQUENCE   // Beat 4 — character reacts, scene destabilizes
+  CLIFFHANGER   // Beat 5 — leave unresolved, make them want more
+}
+
+model OtpRateLimit {
+  phone       String   @id
+  count       Int      @default(0)
+  windowStart DateTime @default(now())
+}
